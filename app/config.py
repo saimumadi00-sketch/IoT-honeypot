@@ -1,0 +1,16 @@
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+LOG_DIR = BASE_DIR / "logs"
+
+DB_PATH = DATA_DIR / "honeypot.db"
+
+DASHBOARD_HOST = "127.0.0.1"
+DASHBOARD_PORT = 5000
+
+FAKE_HTTP_HOST = "127.0.0.1"
+FAKE_HTTP_PORT = 8080
+
+FAKE_SHELL_HOST = "127.0.0.1"
+FAKE_SHELL_PORT = 2222
