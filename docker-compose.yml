@@ -1,0 +1,34 @@
+services:
+  honeypot:
+    build: .
+    restart: unless-stopped
+    environment:
+      # Compose refuses to start until you set this (in .env or your shell).
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?Set DASHBOARD_PASSWORD in .env}
+      DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-admin}
+      HONEYPOT_LOG_LEVEL: ${HONEYPOT_LOG_LEVEL:-INFO}
+    ports:
+      # Dashboard: published on this machine only. Reach it remotely over an
+      # SSH tunnel (ssh -L 5000:127.0.0.1:5000 host), never the open internet.
+      - "127.0.0.1:5000:5000"
+      # Decoys: reachable from the network.
+      - "8080:8080"
+      - "2222:2222"
+      - "1883:1883"
+      - "23:2323"
+    volumes:
+      - honeypot-data:/data
+    # Containment: an attacker should gain nothing even if a decoy has a bug.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 512m
+    cpus: 1.0
+
+volumes:
+  honeypot-data:
