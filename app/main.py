@@ -1,330 +1,152 @@
-import csv
-import io
-import json
+"""Entry point: starts the decoys and the dashboard.
+
+Run with ``python -m app.main`` or ``python app/main.py``.
+"""
+
+from __future__ import annotations
+
+import logging
+import signal
 import sys
 import threading
-from html import escape
 from pathlib import Path
-from flask import Flask, Response, jsonify, request
 
 # Allow running with: python app/main.py
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.config import (
-    DASHBOARD_HOST,
-    DASHBOARD_PORT,
-    FAKE_HTTP_HOST,
-    FAKE_HTTP_PORT,
-    FAKE_MQTT_HOST,
-    FAKE_MQTT_PORT,
-    FAKE_SHELL_HOST,
-    FAKE_SHELL_PORT,
-    FAKE_TELNET_HOST,
-    FAKE_TELNET_PORT,
-)
-from app.database import init_db, get_events, get_stats
-from services.fake_http import create_fake_http_app
-from services.fake_mqtt import start_fake_mqtt
-from services.fake_shell import start_fake_shell
-from services.fake_telnet import start_fake_telnet
+from waitress.server import create_server  # noqa: E402
+
+from analyzer import classifier  # noqa: E402
+from app.config import settings  # noqa: E402
+from app.dashboard import create_dashboard_app  # noqa: E402
+from app.database import init_db  # noqa: E402
+from app.logging_setup import configure_logging  # noqa: E402
+from services.fake_http import SERVER_IDENT, create_fake_http_app  # noqa: E402
+from services.fake_mqtt import create_mqtt_server  # noqa: E402
+from services.fake_shell import create_shell_server  # noqa: E402
+from services.fake_telnet import create_telnet_server  # noqa: E402
+
+logger = logging.getLogger("honeypot")
 
 
-dashboard = Flask("honeypot_dashboard")
+class WebService:
+    """A Flask app served by waitress in a background thread."""
+
+    def __init__(self, name: str, app, host: str, port: int, **options) -> None:
+        self.name = name
+        self.host = host
+        self.port = port
+        self._app = app
+        self._options = options
+        self._server = None
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._server = create_server(self._app, host=self.host, port=self.port, **self._options)
+        self._thread = threading.Thread(target=self._server.run, name=self.name, daemon=True)
+        self._thread.start()
+        logger.info("%s listening on %s:%d", self.name, self.host, self.port)
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.close()
 
 
-@dashboard.route("/")
-def home():
-    stats = get_stats()
-    events = get_events(limit=30)
-    chart_data = {
-        "classifications": {
-            "labels": [item["classification"] for item in stats["by_classification"]],
-            "counts": [item["count"] for item in stats["by_classification"]],
-        },
-        "services": {
-            "labels": [item["service"] for item in stats["by_service"]],
-            "counts": [item["count"] for item in stats["by_service"]],
-        },
-    }
-    chart_data_json = json.dumps(chart_data)
-
-    rows = ""
-    for event in events:
-        rows += f"""
-        <tr>
-          <td>{escape(str(event['timestamp']))}</td>
-          <td>{escape(str(event['source_ip']))}</td>
-          <td>{escape(str(event['service']))}</td>
-          <td>{escape(str(event['event_type']))}</td>
-          <td>{escape(str(event['classification']))}</td>
-          <td>{escape(str(event['risk_level']))}</td>
-          <td><code>{escape(str(event['raw_input']))}</code></td>
-        </tr>
-        """
-
-    chart_script = """
-        <script>
-          const chartData = CHART_DATA_JSON;
-
-          new Chart(document.getElementById("classificationChart"), {
-            type: "bar",
-            data: {
-              labels: chartData.classifications.labels,
-              datasets: [{
-                label: "Events",
-                data: chartData.classifications.counts,
-                backgroundColor: "#2f80ed"
-              }]
-            },
-            options: {
-              responsive: true,
-              plugins: {
-                legend: {
-                  display: false
-                }
-              },
-              scales: {
-                y: {
-                  beginAtZero: true,
-                  ticks: {
-                    precision: 0
-                  }
-                }
-              }
-            }
-          });
-
-          new Chart(document.getElementById("serviceChart"), {
-            type: "bar",
-            data: {
-              labels: chartData.services.labels,
-              datasets: [{
-                label: "Events",
-                data: chartData.services.counts,
-                backgroundColor: "#27ae60"
-              }]
-            },
-            options: {
-              responsive: true,
-              plugins: {
-                legend: {
-                  display: false
-                }
-              },
-              scales: {
-                y: {
-                  beginAtZero: true,
-                  ticks: {
-                    precision: 0
-                  }
-                }
-              }
-            }
-          });
-        </script>
-    """.replace("CHART_DATA_JSON", chart_data_json)
-
-    return f"""
-    <html>
-      <head>
-        <title>Adaptive IoT Honeypot Dashboard</title>
-        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-        <style>
-          body {{
-            font-family: Arial, sans-serif;
-            margin: 30px;
-            background: #f5f7fb;
-          }}
-          .card {{
-            background: white;
-            border-radius: 12px;
-            padding: 20px;
-            margin-bottom: 20px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-          }}
-          table {{
-            width: 100%;
-            border-collapse: collapse;
-            background: white;
-          }}
-          th, td {{
-            border-bottom: 1px solid #ddd;
-            padding: 8px;
-            text-align: left;
-            font-size: 14px;
-          }}
-          th {{
-            background: #222;
-            color: white;
-          }}
-          code {{
-            background: #eee;
-            padding: 2px 5px;
-            border-radius: 4px;
-          }}
-          .charts {{
-            display: grid;
-            gap: 20px;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-          }}
-        </style>
-      </head>
-      <body>
-        <h1>Adaptive IoT Honeypot Dashboard</h1>
-
-        <div class="card">
-          <h2>Summary</h2>
-          <p><strong>Total events:</strong> {stats['total_events']}</p>
-          <p><strong>Fake HTTP panel:</strong> http://127.0.0.1:{FAKE_HTTP_PORT}</p>
-          <p><strong>Fake shell:</strong> nc 127.0.0.1 {FAKE_SHELL_PORT}</p>
-          <p><strong>Fake MQTT:</strong> 127.0.0.1:{FAKE_MQTT_PORT}</p>
-          <p><strong>Fake Telnet:</strong> telnet 127.0.0.1 {FAKE_TELNET_PORT}</p>
-        </div>
-
-        <div class="card">
-          <h2>Charts</h2>
-          <div class="charts">
-            <div>
-              <h3>Events by Classification</h3>
-              <canvas id="classificationChart"></canvas>
-            </div>
-            <div>
-              <h3>Events by Service</h3>
-              <canvas id="serviceChart"></canvas>
-            </div>
-          </div>
-        </div>
-
-        <div class="card">
-          <h2>Recent Events</h2>
-          <table>
-            <tr>
-              <th>Time</th>
-              <th>Source IP</th>
-              <th>Service</th>
-              <th>Event</th>
-              <th>Classification</th>
-              <th>Risk</th>
-              <th>Raw Input</th>
-            </tr>
-            {rows}
-          </table>
-        </div>
-        {chart_script}
-      </body>
-    </html>
-    """
-
-
-@dashboard.route("/api/events")
-def api_events():
-    return jsonify(get_events(limit=100))
-
-
-@dashboard.route("/api/stats")
-def api_stats():
-    return jsonify(get_stats())
-
-
-@dashboard.route("/api/export")
-def api_export():
-    export_format = request.args.get("format", "json").lower()
-    events = get_events(limit=-1)
-
-    if export_format == "json":
-        return Response(
-            json.dumps(events, indent=2),
-            mimetype="application/json",
+def build_services() -> list:
+    services = []
+    if settings.enable_shell:
+        services.append(create_shell_server(settings.shell_host, settings.shell_port))
+    if settings.enable_telnet:
+        services.append(create_telnet_server(settings.telnet_host, settings.telnet_port))
+    if settings.enable_mqtt:
+        services.append(create_mqtt_server(settings.mqtt_host, settings.mqtt_port))
+    if settings.enable_http:
+        services.append(
+            WebService(
+                "fake_http",
+                create_fake_http_app(),
+                settings.http_host,
+                settings.http_port,
+                ident=SERVER_IDENT,
+                threads=8,
+                connection_limit=settings.max_connections,
+                channel_timeout=settings.idle_timeout,
+                max_request_body_size=settings.max_http_body_bytes,
+            )
         )
+    return services
 
-    if export_format == "csv":
-        fieldnames = [
-            "id",
-            "timestamp",
-            "source_ip",
-            "service",
-            "event_type",
-            "raw_input",
-            "classification",
-            "risk_level",
-        ]
 
-        def generate_csv():
-            output = io.StringIO()
-            writer = csv.DictWriter(output, fieldnames=fieldnames)
-            writer.writeheader()
-            yield output.getvalue()
-            output.seek(0)
-            output.truncate(0)
+def main() -> int:
+    configure_logging()
 
-            for event in events:
-                writer.writerow({field: event.get(field, "") for field in fieldnames})
-                yield output.getvalue()
-                output.seek(0)
-                output.truncate(0)
-
-        return Response(
-            generate_csv(),
-            mimetype="text/csv",
-            headers={"Content-Disposition": "attachment; filename=honeypot_events.csv"},
+    if settings.dashboard_is_public and not settings.dashboard_auth_enabled:
+        logger.error(
+            "Refusing to start: DASHBOARD_HOST=%s exposes the dashboard beyond this "
+            "machine but DASHBOARD_PASSWORD is not set.",
+            settings.dashboard_host,
         )
+        return 2
 
-    return Response(
-        "Unsupported export format. Use format=csv or format=json.\n",
-        status=400,
-        mimetype="text/plain",
-    )
-
-
-def run_fake_http():
-    fake_http = create_fake_http_app()
-    fake_http.run(
-        host=FAKE_HTTP_HOST,
-        port=FAKE_HTTP_PORT,
-        debug=False,
-        use_reloader=False,
-    )
-
-
-def run_dashboard():
-    dashboard.run(
-        host=DASHBOARD_HOST,
-        port=DASHBOARD_PORT,
-        debug=False,
-        use_reloader=False,
-    )
-
-
-def main():
     init_db()
+    classifier.warm_up()
 
-    print("[+] Starting Adaptive IoT Honeypot Starter")
+    dashboard = WebService(
+        "dashboard",
+        create_dashboard_app(),
+        settings.dashboard_host,
+        settings.dashboard_port,
+        threads=4,
+    )
 
-    threads = [
-        threading.Thread(target=start_fake_shell, args=(FAKE_SHELL_HOST, FAKE_SHELL_PORT), daemon=True),
-        threading.Thread(target=start_fake_mqtt, args=(FAKE_MQTT_HOST, FAKE_MQTT_PORT), daemon=True),
-        threading.Thread(target=start_fake_telnet, args=(FAKE_TELNET_HOST, FAKE_TELNET_PORT), daemon=True),
-        threading.Thread(target=run_fake_http, daemon=True),
-        threading.Thread(target=run_dashboard, daemon=True),
-    ]
+    started = []
+    failed = []
+    for service in [*build_services(), dashboard]:
+        try:
+            service.start()
+            started.append(service)
+        except OSError as exc:
+            failed.append(service.name)
+            logger.error(
+                "Could not start %s on %s:%s: %s", service.name, service.host, service.port, exc
+            )
 
-    for thread in threads:
-        thread.start()
+    if dashboard not in started or len(started) == 1:
+        logger.error("Nothing useful is running; shutting down.")
+        for service in started:
+            service.stop()
+        return 1
+    if failed:
+        logger.warning("Running without: %s", ", ".join(failed))
 
-    print(f"[+] Dashboard: http://{DASHBOARD_HOST}:{DASHBOARD_PORT}")
-    print(f"[+] Fake HTTP IoT Admin: http://{FAKE_HTTP_HOST}:{FAKE_HTTP_PORT}")
-    print(f"[+] Fake IoT Shell: nc {FAKE_SHELL_HOST} {FAKE_SHELL_PORT}")
-    print(f"[+] Fake MQTT: {FAKE_MQTT_HOST}:{FAKE_MQTT_PORT}")
-    print(f"[+] Fake Telnet: telnet {FAKE_TELNET_HOST} {FAKE_TELNET_PORT}")
-    print("[+] Press CTRL+C to stop.")
+    stop = threading.Event()
 
-    try:
-        while True:
-            pass
-    except KeyboardInterrupt:
-        print("\n[+] Honeypot stopped.")
+    def request_stop(signum, _frame):
+        logger.info("Received signal %s, shutting down", signum)
+        stop.set()
+
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
+
+    logger.info(
+        "Honeypot running. Dashboard: http://%s:%d (auth %s). Press CTRL+C to stop.",
+        settings.dashboard_host,
+        settings.dashboard_port,
+        "on" if settings.dashboard_auth_enabled else "OFF",
+    )
+    while not stop.wait(1.0):
+        pass
+
+    for service in started:
+        try:
+            service.stop()
+        except Exception:  # noqa: BLE001
+            logger.exception("Error while stopping %s", service.name)
+    logger.info("Honeypot stopped.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
